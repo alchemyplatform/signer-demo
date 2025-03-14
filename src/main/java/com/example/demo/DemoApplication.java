@@ -35,119 +35,102 @@ import org.web3j.utils.Convert;
 @SpringBootApplication
 public class DemoApplication {
 
-	private final ObjectMapper objectMapper;
+    private final ObjectMapper objectMapper;
 
-	@Builder
-	public record UserOperation(
-			String sender,
-			String nonce,
-			Optional<String> factory,
-			Optional<String> factoryData,
-			String callData,
-			String callGasLimit,
-			String verificationGasLimit,
-			String preVerificationGas,
-			String maxFeePerGas,
-			String maxPriorityFeePerGas,
-			String paymasterVerificationGasLimit,
-			Optional<String> paymasterPostOpGasLimit
-	){}
+    /// 4337 UserOperation struct.
+    @Builder
+    public record UserOperation(String sender, String nonce, Optional<String> factory, Optional<String> factoryData,
+            String callData, String callGasLimit, String verificationGasLimit, String preVerificationGas,
+            String maxFeePerGas, String maxPriorityFeePerGas, String paymasterVerificationGasLimit,
+            Optional<String> paymasterPostOpGasLimit) {
+    }
 
-	public DemoApplication(ObjectMapper objectMapper) {
-		HttpConfig config = new HttpConfig(
-				"<YOUR_API>"
-		);
-		signerClient = new SignerClient(config);
-		this.objectMapper = objectMapper;
-	}
-	@Builder
-	public record AuthRequest(
-		String nonce
-	){}
+    /// Those are our OIDC request response definition.
+    @Builder
+    public record AuthRequest(String nonce) {
+    }
 
-	public record AuthResponse(
-			String token
-	){}
-	public static void main(String[] args) throws GeneralSecurityException {
+    public record AuthResponse(String token) {
+    }
 
-		TinkConfig.register();
-		SpringApplication.run(DemoApplication.class, args);
-	}
+    public DemoApplication(ObjectMapper objectMapper) {
+        HttpConfig config = new HttpConfig("<YOUR_ALCHEMY_API>");
+        signerClient = new SignerClient(config);
+        this.objectMapper = objectMapper;
+    }
 
-	@GetMapping("/user")
-	///  This endpoint initialize a stamper for the user, and auth the user.
-	public String user(@RequestParam(value = "email", defaultValue = "") String email)
-      throws Exception {
-		// initialize a tek manager. it will then be stored in stamper.
-		TekManager tekManager = TekManager.initializeTekManager();
-		this.stamper = new Stamper(tekManager);
+    public static void main(String[] args) throws GeneralSecurityException {
+        // need to include this to enable server side encryption.
+        TinkConfig.register();
+        SpringApplication.run(DemoApplication.class, args);
+    }
 
-		// This calls our OIDC connector to issue a jwt token.
-		// CHANGE-ME: this should be replaced to how client initialized a jwt token.
-		AuthRequest request = AuthRequest.builder()
-				.nonce(
-						signerClient.targetPublicKeyHex(stamper)).build();
+    @GetMapping("/user")
+    /// This endpoint initialize a stamper for the user, and auth the user.
+    public String user(@RequestParam(value = "email", defaultValue = "") String email) throws Exception {
+        // initialize a tek manager. it will then be stored in stamper.
+        TekManager tekManager = TekManager.initializeTekManager();
+        this.stamper = new Stamper(tekManager);
 
-		AuthResponse response = auth(request);
-		// Use SDK to auth user. after auth, stamper will hold the stamping key.
-		this.signer = signerClient.authenticateWithJWT(stamper, response.token(), "andy", 6000);
+        // This calls our OIDC connector to issue a jwt token.
+        // CHANGE-ME: this should be replaced to how client initialized a jwt token.
+        AuthRequest request = AuthRequest.builder().nonce(signerClient.targetPublicKeyHex(stamper)).build();
 
-		return "";
-	}
+        AuthResponse response = auth(request);
+        // Use SDK to auth user. after auth, stamper will hold the stamping key.
+        this.signer = signerClient.authenticateWithJWT(stamper, response.token(), "andy", 6000);
 
-	/// This endpoint signs a transaction with stamper. In this Demo, it signs a
-	/// 4337 User Operation.
-	@GetMapping("/sign")
-	public String sign(@RequestParam(value = "payload", defaultValue = "") String payload)
-      throws Exception {
+        return "";
+    }
 
-		// Construct a 4337 UserOpeartion and convert to Json format
-		UserOperation uo = constructUO(this.signer.address());
-		String uo_str = objectMapper.writeValueAsString(uo);
+    /// This endpoint signs a transaction with stamper. In this Demo, it signs a
+    /// 4337 User Operation.
+    @GetMapping("/sign")
+    public String sign(@RequestParam(value = "payload", defaultValue = "") String payload) throws Exception {
 
-		// Sign the transaction.
-		String signature = String.valueOf(
-        signerClient.signEthTx( stamper, this.signer, Bytes.copyFrom(uo_str.getBytes())));
+        // Construct a 4337 UserOpeartion and convert to Json format
+        UserOperation uo = constructUO(this.signer.address());
+        String uo_str = objectMapper.writeValueAsString(uo);
 
-		return signature;
-	}
+        // Sign the transaction.
+        String signature = String
+                .valueOf(signerClient.signEthTx(stamper, this.signer, Bytes.copyFrom(uo_str.getBytes())));
 
-	/// This is call OIDC to generate a jwt token.
-	/// Should contact Alchemy to add your ODIC connector and replace wth that URI.
-	public AuthResponse auth(AuthRequest payload) throws IOException, InterruptedException {
-		ObjectMapper objectMapper = new ObjectMapper();
-		URI uri = URI.create("https://eft-full-koi.ngrok-free.app/api/authenticate");
-		HttpRequest http_request = HttpRequest.newBuilder().uri(uri).header("accept", "application/json")
-				.header("content-type", "application/json")
-				.method("POST", HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(payload))).build();
-		HttpResponse<String> response = HttpClient.newHttpClient().send(http_request, HttpResponse.BodyHandlers.ofString());
+        return signature;
+    }
 
-		String token = response.body();
-		return objectMapper.readValue(token, AuthResponse.class);
-	}
+    /// This is call OIDC to generate a jwt token.
+    /// Should contact Alchemy to add your ODIC connector and replace wth that URI.
+    public AuthResponse auth(AuthRequest payload) throws IOException, InterruptedException {
+        ObjectMapper objectMapper = new ObjectMapper();
+        // CHANGE-ME: change to your OIDC connector
+        URI uri = URI.create("https://eft-full-koi.ngrok-free.app/api/authenticate");
+        HttpRequest http_request = HttpRequest.newBuilder().uri(uri).header("accept", "application/json")
+                .header("content-type", "application/json")
+                .method("POST", HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(payload))).build();
+        HttpResponse<String> response = HttpClient.newHttpClient().send(http_request,
+                HttpResponse.BodyHandlers.ofString());
 
-	/// This is simulating a prepareUO call to generate a UO. currently it is faked.
-	private UserOperation constructUO(String senderAddress){
-		return UserOperation.builder()
-				.sender(senderAddress)
-				.callData("0x8DD7712Fb61d27f6000000000000000000000000efa0a72e583ea2a0babb14b9ced339ba4367e24300000000000000000000000000000000000000000000000000b1a2bc2ec5000000000000000000000000000000000000000000000000000000000000000000600000000000000000000000000000000000000000000000000000000000000000")
-				.nonce("0x0")
-				.callGasLimit("0x1234")
-				.verificationGasLimit("0x1234")
-				.maxFeePerGas("0x1234")
-				.paymasterVerificationGasLimit("0x1234")
-				.preVerificationGas("0x1234")
-				.build();
-	}
+        String token = response.body();
+        return objectMapper.readValue(token, AuthResponse.class);
+    }
 
-	/// Signer client is stateless and could be used the whole life cycle as server.
-	private SignerClient signerClient;
+    /// This is simulating a prepareUO call to generate a UO. currently it is faked.
+    private UserOperation constructUO(String senderAddress) {
+        return UserOperation.builder().sender(senderAddress).callData(
+                "0x8DD7712Fb61d27f6000000000000000000000000efa0a72e583ea2a0babb14b9ced339ba4367e24300000000000000000000000000000000000000000000000000b1a2bc2ec5000000000000000000000000000000000000000000000000000000000000000000600000000000000000000000000000000000000000000000000000000000000000")
+                .nonce("0x0").callGasLimit("0x1234").verificationGasLimit("0x1234").maxFeePerGas("0x1234")
+                .paymasterVerificationGasLimit("0x1234").preVerificationGas("0x1234").build();
+    }
 
-	///  This is simulating a stored stamper. it is a per-user session per stamper. normally,
-	/// it should be stored after user authed, and load for user sign txns.
-	private Stamper stamper;
+    /// Signer client is stateless and could be used the whole life cycle as server.
+    private SignerClient signerClient;
 
-	///  This is simulating a authed user. it is a per-user session per stamper. normally,
-	/// it should be stored after user authed, and load for user sign txns.
-	private User signer;
+    /// This is simulating a stored stamper. it is a per-user session per stamper. normally,
+    /// it should be stored after user authed, and load for user sign txns.
+    private Stamper stamper;
+
+    /// This is simulating a authed user. it is a per-user session per stamper. normally,
+    /// it should be stored after user authed, and load for user sign txns.
+    private User signer;
 }
