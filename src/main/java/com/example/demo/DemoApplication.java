@@ -10,8 +10,14 @@ import com.alchemy.aa.core.TekManager;
 import com.auth0.jwt.JWT;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.crypto.tink.InsecureSecretKeyAccess;
 import com.google.crypto.tink.config.TinkConfig;
+import com.google.crypto.tink.hybrid.HpkeParameters;
+import com.google.crypto.tink.hybrid.HpkePrivateKey;
+import com.google.crypto.tink.hybrid.HpkePublicKey;
+import com.google.crypto.tink.subtle.EllipticCurves;
 import com.google.crypto.tink.util.Bytes;
+import com.google.crypto.tink.util.SecretBytes;
 import com.google.protobuf.InvalidProtocolBufferException;
 import java.io.IOException;
 import java.math.BigInteger;
@@ -21,8 +27,16 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.http.HttpResponse.BodyHandler;
 import java.security.GeneralSecurityException;
+import java.security.KeyFactory;
+import java.security.Provider;
+import java.security.Security;
+import java.security.Signature;
+import java.security.interfaces.ECPrivateKey;
+import java.security.spec.PKCS8EncodedKeySpec;
 import java.util.Optional;
 import lombok.Builder;
+import org.bouncycastle.jce.provider.BouncyCastleProvider;
+import org.bouncycastle.util.encoders.Hex;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -37,14 +51,6 @@ public class DemoApplication {
 
     private final ObjectMapper objectMapper;
 
-    /// 4337 UserOperation struct.
-    @Builder
-    public record UserOperation(String sender, String nonce, Optional<String> factory, Optional<String> factoryData,
-            String callData, String callGasLimit, String verificationGasLimit, String preVerificationGas,
-            String maxFeePerGas, String maxPriorityFeePerGas, String paymasterVerificationGasLimit,
-            Optional<String> paymasterPostOpGasLimit) {
-    }
-
     /// Those are our OIDC request response definition.
     @Builder
     public record AuthRequest(String nonce) {
@@ -54,14 +60,20 @@ public class DemoApplication {
     }
 
     public DemoApplication(ObjectMapper objectMapper) {
-        HttpConfig config = new HttpConfig("<YOUR_ALCHEMY_API>");
+        HttpConfig config = new HttpConfig("<YOUR_PRIVATE_KEY>");
         signerClient = new SignerClient(config);
         this.objectMapper = objectMapper;
     }
 
     public static void main(String[] args) throws GeneralSecurityException {
-        // need to include this to enable server side encryption.
+        // Needed to include this to enable server side encryption.
         TinkConfig.register();
+
+        // Needed to include encryption provider
+        if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
+            Security.addProvider(new BouncyCastleProvider());
+        }
+
         SpringApplication.run(DemoApplication.class, args);
     }
 
@@ -69,7 +81,9 @@ public class DemoApplication {
     /// This endpoint initialize a stamper for the user, and auth the user.
     public String user(@RequestParam(value = "email", defaultValue = "") String email) throws Exception {
         // initialize a tek manager. it will then be stored in stamper.
+
         TekManager tekManager = TekManager.initializeTekManager();
+
         this.stamper = new Stamper(tekManager);
 
         // This calls our OIDC connector to issue a jwt token.
@@ -80,7 +94,7 @@ public class DemoApplication {
         // Use SDK to auth user. after auth, stamper will hold the stamping key.
         this.signer = signerClient.authenticateWithJWT(stamper, response.token(), "andy", 6000);
 
-        return "";
+        return objectMapper.writeValueAsString(this.signer);
     }
 
     /// This endpoint signs a transaction with stamper. In this Demo, it signs a
@@ -89,12 +103,11 @@ public class DemoApplication {
     public String sign(@RequestParam(value = "payload", defaultValue = "") String payload) throws Exception {
 
         // Construct a 4337 UserOpeartion and convert to Json format
-        UserOperation uo = constructUO(this.signer.address());
-        String uo_str = objectMapper.writeValueAsString(uo);
+        Bytes txn = constructTransaction(this.signer.address());
 
+        System.out.println("txn: " + txn);
         // Sign the transaction.
-        String signature = String
-                .valueOf(signerClient.signEthTx(stamper, this.signer, Bytes.copyFrom(uo_str.getBytes())));
+        String signature = (signerClient.signEthTx(stamper, this.signer, txn));
 
         return signature;
     }
@@ -116,11 +129,19 @@ public class DemoApplication {
     }
 
     /// This is simulating a prepareUO call to generate a UO. currently it is faked.
-    private UserOperation constructUO(String senderAddress) {
-        return UserOperation.builder().sender(senderAddress).callData(
-                "0x8DD7712Fb61d27f6000000000000000000000000efa0a72e583ea2a0babb14b9ced339ba4367e24300000000000000000000000000000000000000000000000000b1a2bc2ec5000000000000000000000000000000000000000000000000000000000000000000600000000000000000000000000000000000000000000000000000000000000000")
-                .nonce("0x0").callGasLimit("0x1234").verificationGasLimit("0x1234").maxFeePerGas("0x1234")
-                .paymasterVerificationGasLimit("0x1234").preVerificationGas("0x1234").build();
+    private Bytes constructTransaction(String senderAddress) {
+        BigInteger nonce = BigInteger.valueOf(0); // 交易序号，需要从链上查询
+        BigInteger gasPrice = BigInteger.valueOf(2_000_000_000L); // 2 Gwei
+        BigInteger gasLimit = BigInteger.valueOf(21000); // 转账一般为21000
+        String toAddress = "0xRecipientAddress...";
+        BigInteger value = BigInteger.valueOf(1_000_000_000_000_000_000L); // 1 ETH in wei
+
+        RawTransaction rawTransaction = RawTransaction.createEtherTransaction(nonce, gasPrice, gasLimit, toAddress,
+                value);
+        long chainId = 1; // 1=Ethereum mainnet, 3=Ropsten, 5=Goerli 等
+        byte[] encodedTxForSigning = org.web3j.crypto.TransactionEncoder.encode(rawTransaction, chainId);
+        byte[] txHashForSigning = org.web3j.crypto.Hash.sha3(encodedTxForSigning);
+        return Bytes.copyFrom(txHashForSigning);
     }
 
     /// Signer client is stateless and could be used the whole life cycle as server.
