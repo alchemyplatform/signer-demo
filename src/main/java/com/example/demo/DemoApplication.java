@@ -50,14 +50,11 @@ public class DemoApplication {
     }
 
     public DemoApplication(ObjectMapper objectMapper) throws IOException {
-        // HttpConfig config = new HttpConfig("<REPLACE_WITH_API_KEY>");
-        HttpConfig config = new HttpConfig("EQbgsNWZ6BJrU3Ggu9d2em21chqRssaU");
-        config.setUrl("https://api.g.alchemy.com/signer/v1/");
+        HttpConfig config = new HttpConfig("<REPLACE_WITH_API_KEY>");
         signerClient = new SignerClient(config);
         this.objectMapper = objectMapper;
         this.storage = new HashMap<>();
-        // this.web3j = Web3j.build(new HttpService("https://eth-sepolia.g.alchemy.com/v2/<REPLACE_WITH_API_KEY>"));
-        this.web3j = Web3j.build(new HttpService("https://eth-sepolia.g.alchemy.com/v2/EQbgsNWZ6BJrU3Ggu9d2em21chqRssaU"));
+        this.web3j = Web3j.build(new HttpService("https://eth-sepolia.g.alchemy.com/v2/<REPLACE_WITH_API_KEY>"));
     }
 
     public static void main(String[] args) throws GeneralSecurityException {
@@ -74,14 +71,14 @@ public class DemoApplication {
 
     @GetMapping("/user")
     /// This endpoint initialize a stamper for the user, and auth the user.
-    public String user(@RequestParam(value = "email", defaultValue = "") String email) throws Exception {
+    public String user() throws Exception {
         // initialize a tek manager. it will then be stored in stamper.
 
-        TekManager tekManager = TekManager.initializeTekManager();
+        TekManager tekManager = TekManager.createNew();
 
         // This calls our OIDC connector to issue a jwt token.
         // CHANGE-ME: this should be replaced to how client initialized a jwt token.
-        AuthRequest request = AuthRequest.builder().nonce(signerClient.targetPublicKeyHex(tekManager)).build();
+        AuthRequest request = AuthRequest.builder().nonce(tekManager.publicKey()).build();
 
         AuthResponse response = auth(request);
         String jwtToken = response.token();
@@ -94,16 +91,17 @@ public class DemoApplication {
     }
 
     /// This endpoint signs a transaction with stamper. In this Demo, it signs an
-    /// Eoa User Operation.
+    /// Eoa transaction.
     @GetMapping("/sign")
     public String sign(@RequestParam(value = "userId", defaultValue = "") String userId) throws Exception {
 
         // load stamper from stroage
-        String jsonStampper =  storage.get(userId);
+        String jsonStampper = storage.get(userId);
         // deserialize from storage.
         Stamper stamper = objectMapper.readValue(jsonStampper, Stamper.class);
 
-        RawTransaction rawTransaction = constructTransaction(stamper.getUser().address(), "0x8127382B4850527D0b94819606Ff2d7fF0f16E9d");
+        RawTransaction rawTransaction = constructTransaction(stamper.getUser().address(),
+                "0x8127382B4850527D0b94819606Ff2d7fF0f16E9d");
         Bytes txn = getEncodedTxForSigning(rawTransaction);
 
         // Sign the transaction.
@@ -111,9 +109,7 @@ public class DemoApplication {
 
         SignatureData signatureData = getSignatureData(signature);
 
-        byte[] signedTransaction = org.web3j.crypto.TransactionEncoder.encode(
-            rawTransaction,
-            signatureData);
+        byte[] signedTransaction = org.web3j.crypto.TransactionEncoder.encode(rawTransaction, signatureData);
         return broadcastSignedTransaction(signedTransaction);
     }
 
@@ -145,15 +141,14 @@ public class DemoApplication {
         BigInteger maxPriorityFeePerGas = Convert.toWei("30", Unit.GWEI).toBigInteger(); // 30 gwei
         BigInteger maxFeePerGas = Convert.toWei("30", Convert.Unit.GWEI).toBigInteger(); // 30 gwei
 
-        return RawTransaction.createEtherTransaction(chainId, nonce, gasLimit, toAddress, value, maxPriorityFeePerGas, maxFeePerGas);
+        return RawTransaction.createEtherTransaction(chainId, nonce, gasLimit, toAddress, value, maxPriorityFeePerGas,
+                maxFeePerGas);
     }
 
     // A helper function to get sender's nonce
     private BigInteger getAccountNonce(String address) throws IOException {
-        EthGetTransactionCount transactionCountResponse = web3j.ethGetTransactionCount(
-            address,
-            DefaultBlockParameterName.LATEST
-        ).send();
+        EthGetTransactionCount transactionCountResponse = web3j
+                .ethGetTransactionCount(address, DefaultBlockParameterName.LATEST).send();
         return transactionCountResponse.getTransactionCount();
     }
 
@@ -190,6 +185,7 @@ public class DemoApplication {
             return txHash;
         }
     }
+
     /// Signer client is stateless and could be used the whole life cycle as server.
     private SignerClient signerClient;
 
