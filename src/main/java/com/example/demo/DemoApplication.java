@@ -1,39 +1,22 @@
 package com.example.demo;
 
 import com.alchemy.aa.Stamper;
-import com.alchemy.aa.Stamper.Stamp;
 import com.alchemy.aa.client.HttpConfig;
-import com.alchemy.aa.client.JacksonBodyHandlers;
 import com.alchemy.aa.client.SignerClient;
 import com.alchemy.aa.client.SignerClient.User;
 import com.alchemy.aa.core.TekManager;
-import com.auth0.jwt.JWT;
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.google.crypto.tink.InsecureSecretKeyAccess;
 import com.google.crypto.tink.config.TinkConfig;
-import com.google.crypto.tink.hybrid.HpkeParameters;
-import com.google.crypto.tink.hybrid.HpkePrivateKey;
-import com.google.crypto.tink.hybrid.HpkePublicKey;
-import com.google.crypto.tink.subtle.EllipticCurves;
 import com.google.crypto.tink.util.Bytes;
-import com.google.crypto.tink.util.SecretBytes;
-import com.google.protobuf.InvalidProtocolBufferException;
 import java.io.IOException;
 import java.math.BigInteger;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
-import java.net.http.HttpResponse.BodyHandler;
 import java.security.GeneralSecurityException;
-import java.security.KeyFactory;
-import java.security.Provider;
 import java.security.Security;
-import java.security.Signature;
-import java.security.interfaces.ECPrivateKey;
-import java.security.spec.PKCS8EncodedKeySpec;
-import java.util.Optional;
+import java.util.HashMap;
 import lombok.Builder;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.bouncycastle.util.encoders.Hex;
@@ -43,7 +26,14 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.web3j.crypto.RawTransaction;
+import org.web3j.crypto.Sign.SignatureData;
+import org.web3j.protocol.Web3j;
+import org.web3j.protocol.core.DefaultBlockParameterName;
+import org.web3j.protocol.core.methods.response.EthGetTransactionCount;
+import org.web3j.protocol.core.methods.response.EthSendTransaction;
+import org.web3j.protocol.http.HttpService;
 import org.web3j.utils.Convert;
+import org.web3j.utils.Convert.Unit;
 
 @RestController
 @SpringBootApplication
@@ -59,10 +49,15 @@ public class DemoApplication {
     public record AuthResponse(String token) {
     }
 
-    public DemoApplication(ObjectMapper objectMapper) {
-        HttpConfig config = new HttpConfig("<YOUR_PRIVATE_KEY>");
+    public DemoApplication(ObjectMapper objectMapper) throws IOException {
+        // HttpConfig config = new HttpConfig("<REPLACE_WITH_API_KEY>");
+        HttpConfig config = new HttpConfig("EQbgsNWZ6BJrU3Ggu9d2em21chqRssaU");
+        config.setUrl("https://api.g.alchemy.com/signer/v1/");
         signerClient = new SignerClient(config);
         this.objectMapper = objectMapper;
+        this.storage = new HashMap<>();
+        // this.web3j = Web3j.build(new HttpService("https://eth-sepolia.g.alchemy.com/v2/<REPLACE_WITH_API_KEY>"));
+        this.web3j = Web3j.build(new HttpService("https://eth-sepolia.g.alchemy.com/v2/EQbgsNWZ6BJrU3Ggu9d2em21chqRssaU"));
     }
 
     public static void main(String[] args) throws GeneralSecurityException {
@@ -84,32 +79,42 @@ public class DemoApplication {
 
         TekManager tekManager = TekManager.initializeTekManager();
 
-        this.stamper = new Stamper(tekManager);
-
         // This calls our OIDC connector to issue a jwt token.
         // CHANGE-ME: this should be replaced to how client initialized a jwt token.
-        AuthRequest request = AuthRequest.builder().nonce(signerClient.targetPublicKeyHex(stamper)).build();
+        AuthRequest request = AuthRequest.builder().nonce(signerClient.targetPublicKeyHex(tekManager)).build();
 
         AuthResponse response = auth(request);
+        String jwtToken = response.token();
         // Use SDK to auth user. after auth, stamper will hold the stamping key.
-        this.signer = signerClient.authenticateWithJWT(stamper, response.token(), "andy", 6000);
 
-        return objectMapper.writeValueAsString(this.signer);
+        Stamper stamper = signerClient.authenticateWithJWT(tekManager, jwtToken, "andy", 6000);
+        String jsonStampper = objectMapper.writeValueAsString(stamper);
+        storage.put(stamper.getUser().userId(), jsonStampper);
+        return objectMapper.writeValueAsString(stamper);
     }
 
-    /// This endpoint signs a transaction with stamper. In this Demo, it signs a
-    /// 4337 User Operation.
+    /// This endpoint signs a transaction with stamper. In this Demo, it signs an
+    /// Eoa User Operation.
     @GetMapping("/sign")
-    public String sign(@RequestParam(value = "payload", defaultValue = "") String payload) throws Exception {
+    public String sign(@RequestParam(value = "userId", defaultValue = "") String userId) throws Exception {
 
-        // Construct a 4337 UserOpeartion and convert to Json format
-        Bytes txn = constructTransaction(this.signer.address());
+        // load stamper from stroage
+        String jsonStampper =  storage.get(userId);
+        // deserialize from storage.
+        Stamper stamper = objectMapper.readValue(jsonStampper, Stamper.class);
 
-        System.out.println("txn: " + txn);
+        RawTransaction rawTransaction = constructTransaction(stamper.getUser().address(), "0x8127382B4850527D0b94819606Ff2d7fF0f16E9d");
+        Bytes txn = getEncodedTxForSigning(rawTransaction);
+
         // Sign the transaction.
-        String signature = (signerClient.signEthTx(stamper, this.signer, txn));
+        String signature = (signerClient.signEthTx(stamper, txn));
 
-        return signature;
+        SignatureData signatureData = getSignatureData(signature);
+
+        byte[] signedTransaction = org.web3j.crypto.TransactionEncoder.encode(
+            rawTransaction,
+            signatureData);
+        return broadcastSignedTransaction(signedTransaction);
     }
 
     /// This is call OIDC to generate a jwt token.
@@ -128,30 +133,69 @@ public class DemoApplication {
         return objectMapper.readValue(token, AuthResponse.class);
     }
 
-    /// This is simulating a prepareUO call to generate a UO. currently it is faked.
-    private Bytes constructTransaction(String senderAddress) {
-        BigInteger nonce = BigInteger.valueOf(0); // 交易序号，需要从链上查询
-        BigInteger gasPrice = BigInteger.valueOf(2_000_000_000L); // 2 Gwei
-        BigInteger gasLimit = BigInteger.valueOf(21000); // 转账一般为21000
-        String toAddress = "0xRecipientAddress...";
-        BigInteger value = BigInteger.valueOf(1_000_000_000_000_000_000L); // 1 ETH in wei
+    /// This method create an unsigned transaction.
+    private RawTransaction constructTransaction(String senderAddress, String receiverAddress) throws IOException {
 
-        RawTransaction rawTransaction = RawTransaction.createEtherTransaction(nonce, gasPrice, gasLimit, toAddress,
-                value);
-        long chainId = 1; // 1=Ethereum mainnet, 3=Ropsten, 5=Goerli 等
-        byte[] encodedTxForSigning = org.web3j.crypto.TransactionEncoder.encode(rawTransaction, chainId);
+        long chainId = 11155111; // 11155111 Ethereum Sepolia
+
+        BigInteger nonce = getAccountNonce(senderAddress); // Transaction Nonce
+        BigInteger gasLimit = BigInteger.valueOf(50_000L);
+        String toAddress = receiverAddress;
+        BigInteger value = Convert.toWei("0.001", Convert.Unit.ETHER).toBigInteger(); // 0.001 ETH in wei
+        BigInteger maxPriorityFeePerGas = Convert.toWei("30", Unit.GWEI).toBigInteger(); // 30 gwei
+        BigInteger maxFeePerGas = Convert.toWei("30", Convert.Unit.GWEI).toBigInteger(); // 30 gwei
+
+        return RawTransaction.createEtherTransaction(chainId, nonce, gasLimit, toAddress, value, maxPriorityFeePerGas, maxFeePerGas);
+    }
+
+    // A helper function to get sender's nonce
+    private BigInteger getAccountNonce(String address) throws IOException {
+        EthGetTransactionCount transactionCountResponse = web3j.ethGetTransactionCount(
+            address,
+            DefaultBlockParameterName.LATEST
+        ).send();
+        return transactionCountResponse.getTransactionCount();
+    }
+
+    // A helper function to encode txn for signing
+    private Bytes getEncodedTxForSigning(RawTransaction rawTransaction) {
+        byte[] encodedTxForSigning = org.web3j.crypto.TransactionEncoder.encode(rawTransaction);
         byte[] txHashForSigning = org.web3j.crypto.Hash.sha3(encodedTxForSigning);
         return Bytes.copyFrom(txHashForSigning);
     }
 
+    // Convert signature to SignatureData structure.
+    private SignatureData getSignatureData(String signature) {
+        String sigHex = signature.replace("0x", ""); // remove leading 0x
+        // r = [0..63] (64 hex chars => 32 bytes)
+        String rHex = sigHex.substring(0, 64);
+        // s = [64..127] (64 hex chars => 32 bytes)
+        String sHex = sigHex.substring(64, 128);
+        // v = [128..130] (2 hex chars => 1 byte)
+        String vHex = sigHex.substring(128, 130);
+        byte[] r = org.bouncycastle.util.encoders.Hex.decode(rHex);
+        byte[] s = org.bouncycastle.util.encoders.Hex.decode(sHex);
+        byte v = org.bouncycastle.util.encoders.Hex.decode(vHex)[0];
+        return new org.web3j.crypto.Sign.SignatureData(v, r, s);
+    }
+
+    // broadcast transaction on chain.
+    private String broadcastSignedTransaction(byte[] signedTransaction) throws IOException {
+        EthSendTransaction response = web3j.ethSendRawTransaction(Hex.toHexString(signedTransaction)).send();
+        if (response.hasError()) {
+            System.err.println("Error: " + response.getError().getMessage());
+            return "Error: " + response.getError().getMessage();
+        } else {
+            String txHash = response.getTransactionHash();
+            return txHash;
+        }
+    }
     /// Signer client is stateless and could be used the whole life cycle as server.
     private SignerClient signerClient;
 
-    /// This is simulating a stored stamper. it is a per-user session per stamper. normally,
-    /// it should be stored after user authed, and load for user sign txns.
-    private Stamper stamper;
+    /// This is simulating a storage of stamper.
+    private HashMap<String, String> storage;
 
-    /// This is simulating a authed user. it is a per-user session per stamper. normally,
-    /// it should be stored after user authed, and load for user sign txns.
-    private User signer;
+    /// This is a web3 connector to get and send transactions.
+    private Web3j web3j;
 }
